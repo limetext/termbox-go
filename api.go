@@ -222,6 +222,9 @@ func Close() {
 	out.WriteString(funcs[t_clear_screen])
 	out.WriteString(funcs[t_exit_ca])
 	out.WriteString(funcs[t_exit_keypad])
+	if color_mode == ColorMode256 {
+		SetColorPalette(Palette256)
+	}
 	tcsetattr(out.Fd(), &orig_tios)
 
 	out.Close()
