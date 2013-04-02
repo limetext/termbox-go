@@ -111,7 +111,7 @@ type RGB struct{ R, G, B byte }
 // used to load various color palettes for 256-color terminals
 func SetColorPalette(p []RGB) {
 	for n, c := range p {
-		out.WriteString(fmt.Sprintf("\033]4;%v;rgb:%2x/%2x/%2x\x1b\\", n, c.R, c.G, c.B))
+		out.WriteString(fmt.Sprintf("\033]4;%v;rgb:%02x/%02x/%02x\x1b\\", n, c.R, c.G, c.B))
 	}
 }
 
