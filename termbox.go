@@ -80,16 +80,6 @@ func write_cursor(x, y int) {
 
 var color_mode ColorMode
 
-// ColorMode specifies whether Termbox will use an extended 256 color palette
-// made popular by XTERM or the classic 16 color palette known as ANSI or 
-// VT100.
-type ColorMode int
-
-const (
-	ColorMode16  = ColorMode(16)  // Foregrounds and Backgrounds are 256 color
-	ColorMode256 = ColorMode(256) // XTERM's 256 color space
-)
-
 func write_sgr_fg(a Attribute) {
 	switch color_mode {
 	case ColorMode256:

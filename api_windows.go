@@ -1,6 +1,9 @@
 package termbox
 
-import "syscall"
+import (
+	"fmt"
+	"syscall"
+)
 
 // public API
 
@@ -166,4 +169,11 @@ func SetInputMode(mode InputMode) InputMode {
 		input_mode = mode
 	}
 	return input_mode
+}
+
+func SetColorPalette(p []RGB) {
+	// TODO
+}
+func SetColorMode(cm ColorMode) error {
+	return fmt.Errorf("SetColorMode not implemented on Windows")
 }

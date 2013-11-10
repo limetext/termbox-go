@@ -147,3 +147,9 @@ const (
 	EventResize
 	EventError
 )
+
+// used to construct palettes from 24-bit RGB values
+type RGB struct{ R, G, B byte }
+
+// a preconfigured palette corresponding to XTERM's defaults
+var Palette256 []RGB
