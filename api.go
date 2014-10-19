@@ -3,6 +3,7 @@
 package termbox
 
 import "errors"
+import "github.com/mattn/go-runewidth"
 import "fmt"
 import "os"
 import "os/signal"
@@ -92,9 +93,13 @@ func Init() error {
 					if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 						break
 					}
-					input_comm <- input_event{buf[:n], err}
-					ie := <-input_comm
-					buf = ie.data[:128]
+					select {
+					case input_comm <- input_event{buf[:n], err}:
+						ie := <-input_comm
+						buf = ie.data[:128]
+					case <-quit:
+						return
+					}
 				}
 			case <-quit:
 				return
@@ -102,6 +107,7 @@ func Init() error {
 		}
 	}()
 
+	IsInit = true
 	return nil
 }
 
@@ -216,6 +222,7 @@ func Close() {
 	out.WriteString(funcs[t_clear_screen])
 	out.WriteString(funcs[t_exit_ca])
 	out.WriteString(funcs[t_exit_keypad])
+	out.WriteString(funcs[t_exit_mouse])
 	if color_mode == ColorMode256 {
 		SetColorPalette(Palette256)
 	}
@@ -238,6 +245,7 @@ func Close() {
 	cursor_y = cursor_hidden
 	foreground = ColorDefault
 	background = ColorDefault
+	IsInit = false
 }
 
 // Synchronizes the internal back buffer with the terminal.
@@ -250,16 +258,37 @@ func Flush() error {
 
 	for y := 0; y < front_buffer.height; y++ {
 		line_offset := y * front_buffer.width
-		for x := 0; x < front_buffer.width; x++ {
+		for x := 0; x < front_buffer.width; {
 			cell_offset := line_offset + x
 			back := &back_buffer.cells[cell_offset]
 			front := &front_buffer.cells[cell_offset]
+			if back.Ch < ' ' {
+				back.Ch = ' '
+			}
+			w := runewidth.RuneWidth(back.Ch)
 			if *back == *front {
+				x += w
 				continue
 			}
-			send_attr(back.Fg, back.Bg)
-			send_char(x, y, back.Ch)
 			*front = *back
+			send_attr(back.Fg, back.Bg)
+
+			if w == 2 && x == front_buffer.width-1 {
+				// there's not enough space for 2-cells rune,
+				// let's just put a space in there
+				send_char(x, y, ' ')
+			} else {
+				send_char(x, y, back.Ch)
+				if w == 2 {
+					next := cell_offset + 1
+					front_buffer.cells[next] = Cell{
+						Ch: 0,
+						Fg: back.Fg,
+						Bg: back.Bg,
+					}
+				}
+			}
+			x += w
 		}
 	}
 	if !is_cursor_hidden(cursor_x, cursor_y) {
@@ -340,8 +369,10 @@ func PollEvent() Event {
 	panic("unreachable")
 }
 
-// Returns the size of the internal back buffer (which is the same as
-// terminal's window size in characters).
+// Returns the size of the internal back buffer (which is mostly the same as
+// terminal's window size in characters). But it doesn't always match the size
+// of the terminal window, after the terminal size has changed, the internal
+// back buffer will get in sync only after Clear or Flush function calls.
 func Size() (int, int) {
 	return termw, termh
 }
@@ -357,16 +388,40 @@ func Clear(fg, bg Attribute) error {
 // Sets termbox input mode. Termbox has two input modes:
 //
 // 1. Esc input mode. When ESC sequence is in the buffer and it doesn't match
-// any known sequence. ESC means KeyEsc.
+// any known sequence. ESC means KeyEsc. This is the default input mode.
 //
 // 2. Alt input mode. When ESC sequence is in the buffer and it doesn't match
 // any known sequence. ESC enables ModAlt modifier for the next keyboard event.
 //
+// Both input modes can be OR'ed with Mouse mode. Setting Mouse mode bit up will
+// enable mouse button click events.
+//
 // If 'mode' is InputCurrent, returns the current input mode. See also Input*
 // constants.
 func SetInputMode(mode InputMode) InputMode {
-	if mode != InputCurrent {
-		input_mode = mode
+	if mode == InputCurrent {
+		return input_mode
 	}
+	if mode&InputMouse != 0 {
+		out.WriteString(funcs[t_enter_mouse])
+	} else {
+		out.WriteString(funcs[t_exit_mouse])
+	}
+
+	input_mode = mode
 	return input_mode
+}
+
+// Sync comes handy when something causes desync between termbox's understanding
+// of a terminal buffer and the reality. Such as a third party process. Sync
+// forces a complete resync between the termbox and a terminal, it may not be
+// visually pretty though.
+func Sync() error {
+	front_buffer.clear()
+	err := send_clear()
+	if err != nil {
+		return err
+	}
+
+	return Flush()
 }

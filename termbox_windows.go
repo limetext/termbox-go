@@ -2,6 +2,8 @@ package termbox
 
 import "syscall"
 import "unsafe"
+import "unicode/utf16"
+import "github.com/mattn/go-runewidth"
 
 type (
 	wchar uint16
@@ -45,6 +47,18 @@ type (
 	window_buffer_size_record struct {
 		size coord
 	}
+	mouse_event_record struct {
+		mouse_pos         coord
+		button_state      dword
+		control_key_state dword
+		event_flags       dword
+	}
+)
+
+const (
+	mouse_lmb = 0x1
+	mouse_rmb = 0x2
+	mouse_mmb = 0x4 | 0x8 | 0x10
 )
 
 func (this coord) uintptr() uintptr {
@@ -275,6 +289,7 @@ var (
 	beg_i        = -1
 	input_comm   = make(chan Event)
 	alt_mode_esc = false
+	consolewin   = false
 
 	// these ones just to prevent heap allocs at all costs
 	tmp_info  console_screen_buffer_info
@@ -360,35 +375,76 @@ func prepare_diff_messages() {
 	diffbuf = diffbuf[:0]
 	beg_x = -1
 
+	attr_beg_i := 0
+
 	for y := 0; y < front_buffer.height; y++ {
 		line_offset := y * front_buffer.width
-		for x := 0; x < front_buffer.width; x++ {
+		for x := 0; x < front_buffer.width; {
 			cell_offset := line_offset + x
 			back := &back_buffer.cells[cell_offset]
 			front := &front_buffer.cells[cell_offset]
-			if *back != *front {
-				// have diff
-				if beg_x == -1 {
-					// no started sequence, start one
-					beg_x, beg_y = x, y
-					beg_i = len(charsbuf)
-				}
-				attr, char := cell_to_char_info(*back)
-				attrsbuf = append(attrsbuf, attr)
-				charsbuf = append(charsbuf, char)
-				*front = *back
-			} else {
+			w := runewidth.RuneWidth(back.Ch)
+			if w == 0 {
+				w = 1
+			}
+			if *back == *front {
 				if beg_x != -1 {
 					// there is a sequence in progress,
 					// commit it
 					diffbuf = append(diffbuf, diff_msg{
 						coord{short(beg_x), short(beg_y)},
-						attrsbuf[beg_i:],
+						attrsbuf[attr_beg_i:],
 						charsbuf[beg_i:],
 					})
 					beg_x = -1
 				}
+				x += w
+				continue
 			}
+
+			*front = *back
+
+			// have diff
+			if beg_x == -1 {
+				// no started sequence, start one
+				beg_x, beg_y = x, y
+				beg_i = len(charsbuf)
+				attr_beg_i = len(attrsbuf)
+			}
+			attr, char := cell_to_char_info(*back)
+			if w == 2 && x == front_buffer.width-1 {
+				// not enough space for a 2-cells rune,
+				// let's just put a space in there
+				front.Ch = ' '
+				char[0] = ' '
+				w = 1
+			}
+
+			attrsbuf = append(attrsbuf, attr)
+			charsbuf = append(charsbuf, char[0])
+			if w == 2 {
+				// we assume here that only 2-cell
+				// runes can use more than one utf16
+				// characters, it's not true, but in
+				// most cases it is
+				attrsbuf = append(attrsbuf, attr)
+				if char[1] != ' ' {
+					charsbuf = append(charsbuf, char[1])
+				}
+
+				// for wide runes we also trash the next cell,
+				// so that it gets updated correctly later, we
+				// never get there if the wide rune happened to
+				// be in the last cell of the line, no need to
+				// check for bounds
+				next := cell_offset + 1
+				front_buffer.cells[next] = Cell{
+					Ch: 0,
+					Fg: back.Fg,
+					Bg: back.Bg,
+				}
+			}
+			x += w
 		}
 	}
 
@@ -397,13 +453,13 @@ func prepare_diff_messages() {
 		// commit it
 		diffbuf = append(diffbuf, diff_msg{
 			coord{short(beg_x), short(beg_y)},
-			attrsbuf[beg_i:],
+			attrsbuf[attr_beg_i:],
 			charsbuf[beg_i:],
 		})
 	}
 }
 
-func cell_to_char_info(c Cell) (attr word, unicode_char wchar) {
+func cell_to_char_info(c Cell) (attr word, wc [2]wchar) {
 	attr = color_table_fg[c.Fg&0x0F] | color_table_bg[c.Bg&0x0F]
 	if c.Fg&AttrReverse|c.Bg&AttrReverse != 0 {
 		attr = (attr&0xF0)>>4 | (attr&0x0F)<<4
@@ -415,13 +471,14 @@ func cell_to_char_info(c Cell) (attr word, unicode_char wchar) {
 		attr |= background_intensity
 	}
 
-	switch ch := c.Ch; {
-	case ch < 0, surr1 <= ch && ch < surr3, ch >= surr_self:
-		unicode_char = replacement_char
-	default:
-		unicode_char = wchar(ch)
+	r0, r1 := utf16.EncodeRune(c.Ch)
+	if r0 == 0xFFFD {
+		wc[0] = wchar(c.Ch)
+		wc[1] = ' '
+	} else {
+		wc[0] = wchar(r0)
+		wc[1] = wchar(r1)
 	}
-
 	return
 }
 
@@ -459,7 +516,7 @@ func clear() {
 	if err != nil {
 		panic(err)
 	}
-	err = fill_console_output_character(out, char, termw*termh)
+	err = fill_console_output_character(out, char[0], termw*termh)
 	if err != nil {
 		panic(err)
 	}
@@ -474,7 +531,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 	}
 
 	e := Event{Type: EventKey}
-	if input_mode == InputAlt {
+	if input_mode&InputAlt != 0 {
 		if alt_mode_esc {
 			e.Mod = ModAlt
 			alt_mode_esc = false
@@ -552,10 +609,10 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 		case vk_enter:
 			e.Key = KeyEnter
 		case vk_esc:
-			switch input_mode {
-			case InputEsc:
+			switch {
+			case input_mode&InputEsc != 0:
 				e.Key = KeyEsc
-			case InputAlt:
+			case input_mode&InputAlt != 0:
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -577,7 +634,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 	if ctrlpressed {
 		if Key(r.unicode_char) >= KeyCtrlA && Key(r.unicode_char) <= KeyCtrlRsqBracket {
 			e.Key = Key(r.unicode_char)
-			if input_mode == InputAlt && e.Key == KeyEsc {
+			if input_mode&InputAlt != 0 && e.Key == KeyEsc {
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -589,7 +646,7 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 			e.Key = KeyCtrl2
 			return e, true
 		case 51:
-			if input_mode == InputAlt {
+			if input_mode&InputAlt != 0 {
 				alt_mode_esc = true
 				return Event{}, false
 			}
@@ -622,6 +679,8 @@ func key_event_record_to_event(r *key_event_record) (Event, bool) {
 func input_event_producer() {
 	var r input_record
 	var err error
+	var last_button Key
+	var last_state = dword(0)
 	for {
 		err = read_console_input(in, &r)
 		if err != nil {
@@ -643,6 +702,34 @@ func input_event_producer() {
 				Type:   EventResize,
 				Width:  int(sr.size.x),
 				Height: int(sr.size.y),
+			}
+		case mouse_event:
+			mr := *(*mouse_event_record)(unsafe.Pointer(&r.event))
+
+			// single or double click
+			switch mr.event_flags {
+			case 0:
+				cur_state := mr.button_state
+				switch {
+				case last_state&mouse_lmb == 0 && cur_state&mouse_lmb != 0:
+					last_button = MouseLeft
+				case last_state&mouse_rmb == 0 && cur_state&mouse_rmb != 0:
+					last_button = MouseRight
+				case last_state&mouse_mmb == 0 && cur_state&mouse_mmb != 0:
+					last_button = MouseMiddle
+				default:
+					last_state = cur_state
+					continue
+				}
+				last_state = cur_state
+				fallthrough
+			case 2:
+				input_comm <- Event{
+					Type:   EventMouse,
+					Key:    last_button,
+					MouseX: int(mr.mouse_pos.x),
+					MouseY: int(mr.mouse_pos.y),
+				}
 			}
 		}
 	}

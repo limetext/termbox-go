@@ -45,15 +45,31 @@ func print_combinations_table(sx, sy int, attrs []termbox.Attribute) {
 	}
 }
 
+func print_wide(x, y int, s string) {
+	red := false
+	for _, r := range s {
+		c := termbox.ColorDefault
+		if red {
+			c = termbox.ColorRed
+		}
+		termbox.SetCell(x, y, r, termbox.ColorDefault, c)
+		x += 2
+		red = !red
+	}
+}
+
+const hello_world = "こんにちは世界"
+
 func draw_all() {
 	termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
 	print_combinations_table(1, 1, []termbox.Attribute{
 		0,
 		termbox.AttrBold,
 	})
-	print_combinations_table(2 + len(chars), 1, []termbox.Attribute{
+	print_combinations_table(2+len(chars), 1, []termbox.Attribute{
 		termbox.AttrReverse,
 	})
+	print_wide(2+len(chars), 11, hello_world)
 	termbox.Flush()
 }
 
@@ -73,6 +89,8 @@ loop:
 			case termbox.KeyEsc:
 				break loop
 			}
+		case termbox.EventResize:
+			draw_all()
 		}
 	}
 }

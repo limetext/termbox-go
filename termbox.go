@@ -26,6 +26,8 @@ const (
 	t_reverse
 	t_enter_keypad
 	t_exit_keypad
+	t_enter_mouse
+	t_exit_mouse
 	t_max_funcs
 )
 
@@ -251,16 +253,39 @@ func tcgetattr(fd uintptr, termios *syscall_Termios) error {
 	return nil
 }
 
-func parse_escape_sequence(event *Event, buf []byte) int {
+func parse_escape_sequence(event *Event, buf []byte) (int, bool) {
 	bufstr := string(buf)
+	// mouse
+	if len(bufstr) >= 6 && strings.HasPrefix(bufstr, "\033[M") {
+		switch buf[3] & 3 {
+		case 0:
+			event.Key = MouseLeft
+		case 1:
+			event.Key = MouseMiddle
+		case 2:
+			event.Key = MouseRight
+		case 3:
+			return 6, false
+		}
+		event.Type = EventMouse // KeyEvent by default
+		// wheel up outputs MouseLeft
+		if buf[3] == 0x60 || buf[3] == 0x70 {
+			event.Key = MouseMiddle
+		}
+		// the coord is 1,1 for upper left
+		event.MouseX = int(buf[4]) - 1 - 32
+		event.MouseY = int(buf[5]) - 1 - 32
+		return 6, true
+	}
+
 	for i, key := range keys {
 		if strings.HasPrefix(bufstr, key) {
 			event.Ch = 0
 			event.Key = Key(0xFFFF - i)
-			return len(key)
+			return len(key), true
 		}
 	}
-	return 0
+	return 0, true
 }
 
 func extract_event(event *Event) bool {
@@ -270,16 +295,16 @@ func extract_event(event *Event) bool {
 
 	if inbuf[0] == '\033' {
 		// possible escape sequence
-		n := parse_escape_sequence(event, inbuf)
+		n, ok := parse_escape_sequence(event, inbuf)
 		if n != 0 {
 			copy(inbuf, inbuf[n:])
 			inbuf = inbuf[:len(inbuf)-n]
-			return true
+			return ok
 		}
 
 		// it's not escape sequence, then it's Alt or Esc, check input_mode
-		switch input_mode {
-		case InputEsc:
+		switch {
+		case input_mode&InputEsc != 0:
 			// if we're in escape mode, fill Esc event, pop buffer, return success
 			event.Ch = 0
 			event.Key = KeyEsc
@@ -287,7 +312,7 @@ func extract_event(event *Event) bool {
 			copy(inbuf, inbuf[1:])
 			inbuf = inbuf[:len(inbuf)-1]
 			return true
-		case InputAlt:
+		case input_mode&InputAlt != 0:
 			// if we're in alt mode, set Alt modifier to event and redo parsing
 			event.Mod = ModAlt
 			copy(inbuf, inbuf[1:])
