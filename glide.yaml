@@ -1,0 +1,4 @@
+package: github.com/limetext/termbox-go
+import:
+  - package: github.com/mattn/go-runewidth
+    ref:     12e0ff74603c9a3209d8bf84f8ab349fe1ad9477
